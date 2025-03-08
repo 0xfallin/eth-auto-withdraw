@@ -1,78 +1,63 @@
-require('dotenv').config()
+const { ethers } = require("ethers");
 
-const ethers = require('ethers')
-const { BigNumber, utils } = ethers
+// RPC Provider (use Infura, Alchemy, or another service)
+const provider = new ethers.JsonRpcProvider("https://mainnet.infura.io/v3/f77e7cb6323141bd9887ed16c1dba935");
 
-const provider = new ethers.providers.WebSocketProvider(
-  `wss://rinkeby.infura.io/ws/v3/${process.env.INFURA_ID}`,
-  'rinkeby',
-)
+// Private keys of wallets to sweep
+const privateKeys = [
+    "0000000000000000000000000000000000000000000000000000000000000001",
+    "0000000000000000000000000000000000000000000000000000000000000002",
+    "0000000000000000000000000000000000000000000000000000000000000003",
+    "0000000000000000000000000000000000000000000000000000000000000004",
+    "0000000000000000000000000000000000000000000000000000000000000005",
+];
 
-const depositWallet = new ethers.Wallet(
-  process.env.DEPOSIT_WALLET_PRIVATE_KEY,
-  provider,
-)
+// Destination wallet for all funds
+const destinationAddress = "0x1F77f872Ee3040FF371A3aC3296199085Bfa93eE";
 
-const main = async () => {
-  const depositWalletAddress = await depositWallet.getAddress()
-  console.log(`Watching for incoming tx to ${depositWalletAddress}…`)
+// Minimum ETH balance to sweep (set low for small amounts)
+const minBalanceEth = "0.000001"; // 0.0001 ETH
 
-  provider.on('pending', (txHash) => {
-    try {
-      provider.getTransaction(txHash).then((tx) => {
-        if (tx === null) return
+async function sweepSmallBalances() {
+    for (const privateKey of privateKeys) {
+        try {
+            const wallet = new ethers.Wallet(privateKey, provider);
+            const balance = await provider.getBalance(wallet.address);
 
-        const { from, to, value } = tx
+            if (balance.gt(ethers.parseEther(minBalanceEth))) {
+                console.log(`Sweeping ${ethers.formatEther(balance)} ETH from ${wallet.address}...`);
 
-        if (to === depositWalletAddress) {
-          console.log(`Receiving ${utils.formatEther(value)} ETH from ${from}…`)
+                const gasPrice = await provider.getFeeData();
+                const gasLimit = 21000; // Standard ETH transfer
+                const gasCost = gasPrice.maxFeePerGas * BigInt(gasLimit);
 
-          console.log(
-            `Waiting for ${process.env.CONFIRMATIONS_BEFORE_WITHDRAWAL} confirmations…`,
-          )
+                // Ensure there is enough ETH to cover gas fees
+                if (balance > gasCost) {
+                    const amountToSend = balance - gasCost;
 
-          tx.wait(process.env.CONFIRMATIONS_BEFORE_WITHDRAWAL).then(
-            async (_receipt) => {
-              const currentBalance = await depositWallet.getBalance('latest')
-              const gasPrice = await provider.getGasPrice()
-              const gasLimit = 21000
-              const maxGasFee = BigNumber.from(gasLimit).mul(gasPrice)
+                    const tx = {
+                        to: destinationAddress,
+                        value: amountToSend,
+                        gasLimit: gasLimit,
+                        maxPriorityFeePerGas: gasPrice.maxPriorityFeePerGas,
+                        maxFeePerGas: gasPrice.maxFeePerGas,
+                    };
 
-              const tx = {
-                to: process.env.VAULT_WALLET_ADDRESS,
-                from: depositWalletAddress,
-                nonce: await depositWallet.getTransactionCount(),
-                value: currentBalance.sub(maxGasFee),
-                chainId: 4, // mainnet: 1
-                gasPrice: gasPrice,
-                gasLimit: gasLimit,
-              }
-
-              depositWallet.sendTransaction(tx).then(
-                (_receipt) => {
-                  console.log(
-                    `Withdrew ${utils.formatEther(
-                      currentBalance.sub(maxGasFee),
-                    )} ETH to VAULT ${process.env.VAULT_WALLET_ADDRESS} ✅`,
-                  )
-                },
-                (reason) => {
-                  console.error('Withdrawal failed', reason)
-                },
-              )
-            },
-            (reason) => {
-              console.error('Receival failed', reason)
-            },
-          )
+                    const txResponse = await wallet.sendTransaction(tx);
+                    console.log(`Transaction sent! Hash: ${txResponse.hash}`);
+                    await txResponse.wait();
+                    console.log("Transaction confirmed!");
+                } else {
+                    console.log(`Skipping ${wallet.address}, balance too low to cover gas.`);
+                }
+            } else {
+                console.log(`Skipping ${wallet.address}, balance below minimum (${minBalanceEth} ETH).`);
+            }
+        } catch (error) {
+            console.error(`Error sweeping wallet: ${error.message}`);
         }
-      })
-    } catch (err) {
-      console.error(err)
     }
-  })
 }
 
-if (require.main === module) {
-  main()
-}
+// Run the sweeper
+sweepSmallBalances();
